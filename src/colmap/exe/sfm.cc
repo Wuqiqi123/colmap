@@ -500,6 +500,124 @@ int RunPosePriorMapper(int argc, char** argv) {
   return EXIT_SUCCESS;
 }
 
+int RunIncrementalModelRefiner(int argc, char** argv) {
+  std::string input_path;
+  std::string output_path;
+  std::string image_list_path;
+
+  OptionManager options;
+  options.AddDatabaseOptions();
+  options.AddImageOptions();
+  options.AddRequiredOption("input_path", &input_path);
+  options.AddRequiredOption("output_path", &output_path);
+  options.AddDefaultOption("image_list_path", &image_list_path);  
+  options.AddMapperOptions();
+  options.Parse(argc, argv);
+
+  if (!ExistsDir(input_path)) {
+    std::cerr << "ERROR: `input_path` is not a directory" << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  if (!ExistsDir(output_path)) {
+    std::cerr << "ERROR: `output_path` is not a directory" << std::endl;
+    return EXIT_FAILURE;
+  }
+
+  const auto& mapper_options = *options.mapper;
+
+  PrintHeading1("Loading model");
+
+  auto reconstruction = std::make_shared<Reconstruction>();
+  reconstruction->Read(input_path);
+
+  // Loads the list of images for which the camera pose will be fixed.
+  std::vector<image_t> image_ids_fixed_poses;
+  if (!image_list_path.empty()) {
+    const auto image_names = ReadTextFileLines(image_list_path);
+    for (const std::string& image_name : image_names) {
+      const Image* image = reconstruction->FindImageWithName(image_name);
+      if (image != nullptr) {
+        image_ids_fixed_poses.push_back(image->ImageId());
+      }
+
+    }
+  }
+
+  PrintHeading1("Loading database");
+
+  Database database(*options.database_path);
+
+  auto database_cache = DatabaseCache::Create(database, 
+                      mapper_options.min_num_matches,
+                      mapper_options.ignore_watermarks,
+                      mapper_options.image_names);
+
+  IncrementalMapper mapper(database_cache);
+  mapper.BeginReconstruction(reconstruction);
+
+  CHECK_GE(reconstruction->NumRegImages(), 2)
+      << "Need at least two images for refinement";
+
+  auto ba_options = mapper_options.GlobalBundleAdjustment();
+  // Configure bundle adjustment.
+  BundleAdjustmentConfig ba_config;
+  for (const image_t image_id : reconstruction->RegImageIds()) {
+    ba_config.AddImage(image_id);
+  }
+
+  // Fix the assigned images:
+  int i = 0;
+  for (const image_t image_id : image_ids_fixed_poses) {
+    if (i == 0) {
+      ba_config.SetConstantCamPose(image_id);
+      const std::string& image_name = reconstruction->Image(image_id).Name();
+      // It return reference of str!
+      std::cout << StringPrintf("  => Fixed the pose of image: %s", image_name.c_str()) << std::endl;
+    } else if (i == 1) {
+      ba_config.SetConstantCamPositions(image_id, {0});
+      const std::string& image_name = reconstruction->Image(image_id).Name();
+      std::cout << StringPrintf("  => Fixed the 1 Dim of image: %s", image_name.c_str())
+                << std::endl;
+    }
+    i++;
+  }
+
+  for (int i = 0; i < mapper_options.ba_global_max_refinements; ++i) {   
+
+    // Avoid degeneracies in bundle adjustment.
+    ObservationManager(*reconstruction).FilterObservationsWithNegativeDepth();
+
+    const size_t num_observations = reconstruction->ComputeNumObservations();
+
+    PrintHeading1("Bundle adjustment");
+    auto bundle_adjuster = CreateDefaultBundleAdjuster(std::move(ba_options), std::move(ba_config), *reconstruction);
+    const auto summary = bundle_adjuster->Solve();
+
+    size_t num_changed_observations = 0;
+    num_changed_observations += mapper.CompleteAndMergeTracks(mapper_options.Triangulation());
+    num_changed_observations += mapper.FilterPoints(mapper_options.Mapper());
+    const double changed =
+        static_cast<double>(num_changed_observations) / num_observations;
+    std::cout << StringPrintf("  => Changed observations: %.6f", changed)
+              << std::endl;
+    if (changed < mapper_options.ba_global_max_refinement_change) {
+      break;
+    }
+
+  }
+
+  PrintHeading1("Extracting colors");
+  reconstruction->ExtractColorsForAllImages(*options.image_path);
+
+  const bool kDiscardReconstruction = false;
+  mapper.EndReconstruction(kDiscardReconstruction);
+
+  reconstruction->Write(output_path);
+
+  return EXIT_SUCCESS;
+}
+
 int RunPointFiltering(int argc, char** argv) {
   std::string input_path;
   std::string output_path;
