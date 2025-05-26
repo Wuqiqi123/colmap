@@ -546,6 +546,8 @@ int RunIncrementalModelRefiner(int argc, char** argv) {
 
   PrintHeading1("Loading database");
 
+  std::cout << "  => Database path: " << options.database_path->c_str() << std::endl;
+
   Database database(*options.database_path);
 
   auto database_cache = DatabaseCache::Create(database, 
@@ -586,7 +588,7 @@ int RunIncrementalModelRefiner(int argc, char** argv) {
   for (int i = 0; i < mapper_options.ba_global_max_refinements; ++i) {   
 
     // Avoid degeneracies in bundle adjustment.
-    ObservationManager(*reconstruction).FilterObservationsWithNegativeDepth();
+    mapper.ObservationManager().FilterObservationsWithNegativeDepth();
 
     const size_t num_observations = reconstruction->ComputeNumObservations();
 
